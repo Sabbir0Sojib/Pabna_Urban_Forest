@@ -1,61 +1,45 @@
-# Urban Tree Characterization with Deep Learning - Pabna Municipality, Bangladesh
+# Urban Tree Characterization with Deep Learning: Pabna Municipality, Bangladesh
 
-Code for the study *"Characterization of Urban Trees with Deep Learning Techniques in Pabna
-Municipality of Bangladesh"*.
+Code for the study "Characterization of Urban Trees with Deep Learning Techniques in Pabna
+Municipality of Bangladesh."
 
-The pipeline maps urban tree canopy across a whole municipality by using high-resolution UAV
-imagery as the label generator for a coarser satellite classifier, then converts the mapped
-canopy into above-ground biomass and carbon estimates.
-
-```
-UAV orthomosaic (5 cm)  ->  deep learning canopy segmentation  ->  crown polygons
-         |                                                              |
-         |                                                    allometric biomass
-         v                                                              |
-  training labels for                                                   v
-  PlanetScope (3 m)  ->  Random Forest canopy map  ->  city and ward statistics
-```
-
-## Repository layout
+UAV imagery trains a canopy segmentation model. That model's output trains a satellite
+classifier for city-wide canopy mapping. Canopy is then converted to biomass and carbon.
 
 ```
-pabna-urban-forest/
-  config.yaml                     all paths, parameters and coefficients
-  requirements.txt
-  run_all.sh                      runs steps 0-6 in order
-  data/README.md                  where to place the input data
-  src/
-    utils.py                      raster IO, ExG, metrics, Gini
-    s00_build_chm.py              canopy height model, CHM = DSM - DEM
-    s01_train_segmentation.py     train canopy segmentation on UAV tiles
-    s02_predict_field_masks.py    tiled inference -> georeferenced canopy mask
-    s03_extract_crowns.py         watershed crown delineation + crown metrics
-    s04_train_canopy_classifier.py  Random Forest city-wide canopy map
-    s05_biomass_carbon.py         crown biomass -> city totals, carbon, CO2e
-    s06_ward_statistics.py        ward canopy/biomass, Gini, canopy deficit
+UAV orthomosaic -> segmentation -> crown polygons -> biomass/carbon
+                                          |
+                          training labels for satellite classifier -> ward statistics
+```
+
+## Layout
+
+```
+config.yaml                     paths, parameters, coefficients
+run_all.sh                      runs steps 0-6 in order
+data/README.md                  input data and where to place it
+src/
+  utils.py                      raster IO, ExG, metrics, Gini
+  s00_build_chm.py              CHM = DSM - DEM
+  s01_train_segmentation.py     train canopy segmentation on UAV tiles
+  s02_predict_field_masks.py    tiled inference -> canopy mask
+  s03_extract_crowns.py         watershed crown delineation + metrics
+  s04_train_canopy_classifier.py  Random Forest city-wide canopy map
+  s05_biomass_carbon.py         crown biomass -> totals, carbon, CO2e
+  s06_ward_statistics.py        ward canopy/biomass, Gini, canopy deficit
 ```
 
 ## Equations
 
-All five equations of the manuscript are implemented, with every coefficient held in
-`config.yaml` rather than hard-coded.
-
 | Eq. | Script | Formula | Source |
 | --- | --- | --- | --- |
-| 1 | `s00_build_chm.py` | `CHM = DSM - DEM` | - |
-| 2 | `s05_biomass_carbon.py` | `D = 0.557 (H x CD)^0.809 exp(0.0562/2)` | Jucker et al. (2017) |
-| 3 | `s05_biomass_carbon.py` | `AGB = 0.0673 (rho D^2 H)^0.976` | Chave et al. (2014) |
-| 4 | `s05_biomass_carbon.py` | `C = AGB x 0.47` | IPCC (2006) |
-| 5 | `s05_biomass_carbon.py` | `CO2e = C x 3.67` | IPCC (2006) |
+| 1 | s00_build_chm.py | CHM = DSM - DEM | - |
+| 2 | s05_biomass_carbon.py | D = 0.557 (H x CD)^0.809 exp(0.0562/2) | Jucker et al. (2017) |
+| 3 | s05_biomass_carbon.py | AGB = 0.0673 (rho D^2 H)^0.976 | Chave et al. (2014) |
+| 4 | s05_biomass_carbon.py | C = AGB x 0.47 | IPCC (2006) |
+| 5 | s05_biomass_carbon.py | CO2e = C x 3.67 | IPCC (2006) |
 
-Units: crown height `H` and crown diameter `CD` in metres, predicted stem diameter `D` in
-centimetres, wood density `rho` in g cm-3 (0.55, Chave et al. 2009), `AGB` in kilograms. The
-exponential term in Equation 2 is the back-transformation correction for a model fitted in log
-space.
-
-Per-crown biomass is aggregated to a density per hectare of canopy within each of the three
-UAV fields. The mean of those three densities is applied to the city-wide canopy area, and
-their spread is carried into the reported uncertainty.
+H and CD in metres, D in centimetres, rho in g/cm3 (0.55, Chave et al. 2009), AGB in kg.
 
 ## Install
 
@@ -66,35 +50,34 @@ python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-A CUDA GPU is needed for step 1 only. Steps 0 and 2-6 run on CPU.
+GPU needed for step 1 only.
 
 ## Data
 
-Raw UAV photographs for the three survey fields are on Zenodo:
+Orthomosaics for the three UAV survey fields are on Zenodo:
 
 ```
-UAV Imagery - https://doi.org/10.5281/zenodo.22141709
+https://doi.org/10.5281/zenodo.22141709
 ```
 
-Build the orthomosaic and DSM for each field yourself with photogrammetry software such as
-Agisoft Metashape, Pix4Dmapper, or OpenDroneMap, then place the exports in `data/`. Training
-annotations are not released; use the published segmentation weights instead:
+Place them in `data/` as described in `data/README.md`. Everything else (DSM, satellite
+imagery, code, derived results) is available from the corresponding author on request.
+
+Published segmentation weights, in place of training annotations:
 
 ```
 https://huggingface.co/Sabbir12345/P6_S4_SegFormer_RGBExG_100ep
 ```
 
-Full details on what is and isn't included are in `data/README.md`.
-
 ## Running
 
-Edit the paths in `config.yaml` first, then either run everything:
+Edit `config.yaml`, then:
 
 ```bash
 bash run_all.sh
 ```
 
-or run the steps one at a time:
+or step by step:
 
 ```bash
 python src/s00_build_chm.py
@@ -106,31 +89,9 @@ python src/s05_biomass_carbon.py
 python src/s06_ward_statistics.py
 ```
 
-Each step writes to `outputs/` and prints the numbers it produced.
-
-## Canopy height, and what runs without it
-
-Equations 2 and 3 both need crown height, so steps 0 and 5 need two extra inputs:
-
-- the **UAV digital surface model**, exported from the photogrammetry project that produced
-  the orthomosaics, and
-- the **ALOS PALSAR 12.5 m DEM**, downloaded free from the Alaska Satellite Facility.
-
-Step 0 subtracts the second from the first to build the canopy height model, and step 3 reads
-crown heights from it. If either file is missing, step 0 exits with a message instead of
-failing, and steps 2, 3, 4 and 6 still produce the full canopy result: segmentation accuracy,
-crown polygons, the city-wide canopy map, canopy cover per ward, the Gini coefficient and the
-canopy deficit. Only the biomass and carbon numbers require height.
-
-Because the deposit holds the raw photographs rather than a finished DSM, the biomass and
-carbon rows below can still be rebuilt end to end, but only after re-running photogrammetry
-yourself. There is no reference mask left to check segmentation accuracy against, so treat any
-rerun's F1/IoU as a new result to interpret on its own, not a check against Table 2.
+Each step writes to `outputs/`.
 
 ## Reported results
-
-These are the values the pipeline produced for the study area, for reference when checking a
-re-run.
 
 | Quantity | Value |
 | --- | --- |
@@ -144,7 +105,7 @@ re-run.
 | Above-ground biomass | 4,416 Mg (3,166-5,665 Mg, +/-28.3%) |
 | Carbon stock | 2,076 Mg |
 | CO2 equivalent | 7,617 Mg |
-| Biomass density | 4.08 Mg ha-1 of land, 15.46 Mg ha-1 of canopy |
+| Biomass density | 4.08 Mg/ha of land, 15.46 Mg/ha of canopy |
 | Canopy Gini coefficient | 0.182 |
 | Canopy deficit, five wards below average | 43.1 ha |
 
