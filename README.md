@@ -1,4 +1,4 @@
-# Urban Tree Characterization with Deep Learning — Pabna Municipality, Bangladesh
+# Urban Tree Characterization with Deep Learning - Pabna Municipality, Bangladesh
 
 Code for the study *"Characterization of Urban Trees with Deep Learning Techniques in Pabna
 Municipality of Bangladesh"*.
@@ -42,7 +42,7 @@ All five equations of the manuscript are implemented, with every coefficient hel
 
 | Eq. | Script | Formula | Source |
 | --- | --- | --- | --- |
-| 1 | `s00_build_chm.py` | `CHM = DSM - DEM` | — |
+| 1 | `s00_build_chm.py` | `CHM = DSM - DEM` | - |
 | 2 | `s05_biomass_carbon.py` | `D = 0.557 (H x CD)^0.809 exp(0.0562/2)` | Jucker et al. (2017) |
 | 3 | `s05_biomass_carbon.py` | `AGB = 0.0673 (rho D^2 H)^0.976` | Chave et al. (2014) |
 | 4 | `s05_biomass_carbon.py` | `C = AGB x 0.47` | IPCC (2006) |
@@ -73,7 +73,7 @@ A CUDA GPU is needed for step 1 only. Steps 0 and 2-6 run on CPU.
 Raw UAV photographs for the three survey fields are on Zenodo:
 
 ```
-UAV Imagery — https://doi.org/10.5281/zenodo.22141709
+UAV Imagery - https://doi.org/10.5281/zenodo.22141709
 ```
 
 Build the orthomosaic and DSM for each field yourself with photogrammetry software such as
