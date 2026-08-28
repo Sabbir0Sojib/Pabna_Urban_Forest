@@ -1,6 +1,6 @@
 # Input data
 
-Zenodo deposit: https://doi.org/10.5281/zenodo.22141709
+Hugging Face dataset: https://doi.org/10.57967/hf/10147
 
 Contains the RGB orthomosaic for each UAV survey field:
 

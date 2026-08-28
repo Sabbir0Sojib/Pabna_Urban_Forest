@@ -54,10 +54,10 @@ GPU needed for step 1 only.
 
 ## Data
 
-Orthomosaics for the three UAV survey fields are on Zenodo:
+Orthomosaics for the three UAV survey fields are on Hugging Face:
 
 ```
-https://doi.org/10.5281/zenodo.22141709
+https://doi.org/10.57967/hf/10147
 ```
 
 Place them in `data/` as described in `data/README.md`. Everything else (DSM, satellite
