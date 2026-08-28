@@ -1,0 +1,29 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite the associated article."
+title: "Pabna urban tree canopy and biomass pipeline"
+abstract: >-
+  Code for mapping urban tree canopy, above-ground biomass and carbon stock in
+  Pabna Municipality, Bangladesh, by training a satellite canopy classifier on
+  reference data generated from UAV imagery with deep learning segmentation.
+authors:
+  - family-names: Islam
+    given-names: Md Sabbir
+    affiliation: "Pabna University of Science and Technology, Pabna-6600, Bangladesh"
+  - family-names: Islam
+    given-names: Md Rahedul
+    affiliation: "Pabna University of Science and Technology, Pabna-6600, Bangladesh"
+license: MIT
+keywords:
+  - urban tree canopy
+  - semantic segmentation
+  - UAV remote sensing
+  - above-ground biomass
+  - cross-resolution transfer
+references:
+  - type: article
+    title: "Characterization of Urban Trees with Deep Learning Techniques in Pabna Municipality of Bangladesh"
+    authors:
+      - family-names: Islam
+        given-names: Md Sabbir
+      - family-names: Islam
+        given-names: Md Rahedul
