@@ -1,163 +1,136 @@
-"""Step 3. Delineate individual crowns from the field canopy masks.
+"""Step 3. Individual crowns by marker-controlled watershed on the UAV canopy height model.
 
-Input  : field canopy masks (the reference masks when configured, otherwise the
-         step 2 predictions), and optionally a canopy height model per field
-Output : outputs/crowns_<Field>.csv     one row per crown
-         outputs/crowns_<Field>.gpkg    the same crowns as polygons
-         outputs/crown_summary.csv      per-field summary
+  * canopy = 0.25 m cells with SegFormer canopy fraction >= 0.5 and CHM >= 2 m
+  * the CHM is Gaussian-smoothed (sigma), local maxima at least `min_distance` apart are markers
+  * watershed of the negative smoothed CHM inside the canopy gives one segment per crown
+  * segments < 1 m2 are dropped; crowns with p95 height > 25 m are flagged and removed
+    (they fell on building edges or orthomosaic gaps when inspected)
 
-Marker-controlled watershed separates touching crowns: the distance transform
-of the canopy mask peaks near each crown centre, and those peaks seed the
-watershed basins.
+The marker distance and smoothing are chosen against the 1,320 manually delineated reference
+crowns (share of reference crowns matched at IoU >= 0.5). The reference crowns are used only for
+this choice and for validation, never for training.
+
+Outputs: outputs/crown_param_scan.json, outputs/crown_validation.json, outputs/crowns_all_fields.csv
 """
+import json
 
-import os
-
-import geopandas as gpd
 import numpy as np
-import pandas as pd
-from rasterio import features
-from rasterio.transform import xy as transform_xy
-from rasterio.windows import Window
-from rasterio.windows import transform as window_transform
 from scipy import ndimage
-from shapely.geometry import shape
+from skimage.draw import polygon as skpoly
 from skimage.feature import peak_local_max
 from skimage.segmentation import watershed
 
-from utils import banner, load_config, pixel_area_m2, project_path, read_raster
+from utils import load_config, out, p, save_json, to_utm45
 
 
-def delineate(mask, min_distance_px):
-    """Label individual crowns in a binary canopy mask."""
-    mask = mask.astype(bool)
-    distance = ndimage.distance_transform_edt(mask)
-    peaks = peak_local_max(distance, min_distance=min_distance_px, labels=mask)
-
-    markers = np.zeros(distance.shape, dtype=np.int32)
-    for i, (row, col) in enumerate(peaks, start=1):
-        markers[row, col] = i
-    if markers.max() == 0:                       # no peaks found: use blobs
-        markers, _ = ndimage.label(mask)
-    return watershed(-distance, markers, mask=mask)
+def load_chm(cfg, k):
+    z = np.load(out(cfg, f"chm_F{k}.npz"))
+    return z["chm_max"], z["frac"], float(z["X0"]), float(z["Y0"]), float(z["RES"])
 
 
-def crown_polygon(sub_mask, row_off, col_off, transform):
-    """Return the crown outline as a shapely polygon in map coordinates."""
-    local = window_transform(
-        Window(col_off, row_off, sub_mask.shape[1], sub_mask.shape[0]), transform)
-    for geom, value in features.shapes(sub_mask.astype(np.uint8),
-                                       mask=sub_mask, transform=local):
-        if value == 1:
-            return shape(geom)
-    return None
-
-
-def crown_table(labels, profile, chm=None, height_percentile=95, min_area_m2=1.5):
-    """Build one row per crown, with geometry in map coordinates."""
-    px_area = pixel_area_m2(profile)
-    transform = profile["transform"]
-    rows, geometries = [], []
-
-    for label_id, slices in enumerate(ndimage.find_objects(labels), start=1):
-        if slices is None:
+def reference_raster(cfg, k, X0, Y0, RES, shape):
+    G = json.load(open(p(cfg, "reference_crowns"), encoding="utf-8"))
+    lab = np.zeros(shape, np.int32)
+    n = 0
+    for f in G["features"]:
+        if f["properties"]["field"] != f"Field{k}":
             continue
-        sub = labels[slices] == label_id
-        area_m2 = int(sub.sum()) * px_area
-        if area_m2 < min_area_m2:
-            continue
+        ring = np.array(f["geometry"]["coordinates"][0])
+        x, y = to_utm45(ring[:, 0], ring[:, 1])
+        rr, cc = skpoly((Y0 - y) / RES, (x - X0) / RES, shape)
+        n += 1
+        lab[rr, cc] = n
+    return lab, n
 
-        polygon = crown_polygon(sub, slices[0].start, slices[1].start, transform)
-        if polygon is None:
-            continue
 
-        # equivalent circular diameter of the crown projection
-        diameter_m = 2.0 * np.sqrt(area_m2 / np.pi)
-        centre = ndimage.center_of_mass(sub)
-        x, y = transform_xy(transform,
-                            slices[0].start + centre[0],
-                            slices[1].start + centre[1])
+def segment(chm, frac, RES, min_dist_m, sigma_m, cc):
+    can = (frac >= cc["canopy_fraction_min"]) & (chm >= cc["min_height_m"])
+    s = ndimage.gaussian_filter(np.nan_to_num(chm), sigma_m / RES)
+    s[~can] = 0
+    pk = peak_local_max(s, min_distance=max(1, int(round(min_dist_m / RES))), threshold_abs=cc["min_height_m"],
+                        labels=can.astype(int))
+    markers = np.zeros(chm.shape, np.int32)
+    markers[pk[:, 0], pk[:, 1]] = np.arange(1, len(pk) + 1)
+    return watershed(-s, markers, mask=can)
 
-        record = {
-            "crown_id": label_id,
-            "area_m2": round(area_m2, 3),
-            "crown_diameter_m": round(diameter_m, 3),
-            "centroid_x": round(float(x), 3),
-            "centroid_y": round(float(y), 3),
-        }
-        if chm is not None:
-            heights = chm[slices][sub]
-            heights = heights[np.isfinite(heights) & (heights > 0)]
-            record["height_m"] = (round(float(np.percentile(heights, height_percentile)), 3)
-                                  if heights.size else np.nan)
 
-        rows.append(record)
-        geometries.append(polygon)
+def best_iou(lab, ref, nref):
+    """Best IoU of each reference crown with any predicted crown, and the matched crown id."""
+    g = ref.ravel()
+    q = lab.ravel()
+    sel = (g > 0) & (q > 0)
+    u, cnt = np.unique(np.stack([g[sel], q[sel]], 1), axis=0, return_counts=True)
+    ga = np.bincount(g, minlength=nref + 1)
+    qa = np.bincount(q)
+    best = np.zeros(nref + 1)
+    who = np.zeros(nref + 1, int)
+    for (gi, qi), c in zip(u, cnt):
+        iou = c / (ga[gi] + qa[qi] - c)
+        if iou > best[gi]:
+            best[gi], who[gi] = iou, qi
+    return best[1:], who[1:], ga[1:], qa
 
-    return pd.DataFrame(rows), geometries
+
+def crown_table(cfg, k, chm, frac, X0, Y0, RES):
+    cc = cfg["crowns"]
+    lab = segment(chm, frac, RES, cc["marker_min_distance_m"], cc["smoothing_sigma_m"], cc)
+    idx = np.arange(1, lab.max() + 1)
+    area = ndimage.sum(np.ones_like(chm), lab, idx) * RES * RES
+    h95 = np.array(ndimage.labeled_comprehension(np.nan_to_num(chm), lab, idx,
+                                                 lambda v: np.percentile(v, cc["height_percentile"]), float, 0))
+    cm = np.array(ndimage.center_of_mass(np.ones_like(chm), lab, idx))
+    cx = X0 + (cm[:, 1] + 0.5) * RES
+    cy = Y0 - (cm[:, 0] + 0.5) * RES
+    flagged = (area >= cc["min_area_m2"]) & (h95 > cc["max_height_m"])
+    keep = (area >= cc["min_area_m2"]) & (h95 <= cc["max_height_m"])
+    return lab, dict(x=cx[keep], y=cy[keep], area=area[keep], cd=2 * np.sqrt(area[keep] / np.pi), h95=h95[keep],
+                     n_flagged=int(flagged.sum()))
 
 
 def main():
     cfg = load_config()
-    crowns_cfg = cfg["crowns"]
-    out_dir = project_path(cfg["paths"]["output_dir"])
+    cc = cfg["crowns"]
+    D = {}
+    for k in (1, 2, 3):
+        chm, frac, X0, Y0, RES = load_chm(cfg, k)
+        ref, n = reference_raster(cfg, k, X0, Y0, RES, chm.shape)
+        D[k] = (chm, frac, X0, Y0, RES, ref, n)
 
-    banner("Step 3  crown delineation")
+    # parameter scan against the reference crowns
+    scan = {}
+    for md in cc["scan_min_distance_m"]:
+        for sg in cc["scan_sigma_m"]:
+            row = []
+            for k in (1, 2, 3):
+                chm, frac, X0, Y0, RES, ref, n = D[k]
+                b, _, _, _ = best_iou(segment(chm, frac, RES, md, sg, cc), ref, n)
+                row.append(round(float((b >= cc["iou_match"]).mean()), 3))
+            scan[f"{md}_{sg}"] = row
+            print("min_distance", md, "sigma", sg, "share of reference crowns matched (F1, F2, F3):", row, flush=True)
+    save_json(scan, out(cfg, "crown_param_scan.json"))
 
-    summary = []
-    for field in cfg["paths"]["field_orthomosaics"]:
-        reference = project_path(cfg["paths"]["field_masks"].get(field, "") or "missing")
-        predicted = os.path.join(out_dir, f"{field}_canopy_mask.tif")
-        mask_path = reference if os.path.exists(reference) else predicted
-        if not os.path.exists(mask_path):
-            print(f"  {field}: no canopy mask found, skipped")
-            continue
-
-        mask, profile = read_raster(mask_path, band=1)
-        mask = (mask == 1)
-
-        chm = None
-        chm_rel = cfg["paths"]["field_chm"].get(field) or ""
-        if chm_rel and os.path.exists(project_path(chm_rel)):
-            chm, _ = read_raster(project_path(chm_rel), band=1)
-            chm = chm.astype(np.float32)
-
-        labels = delineate(mask, crowns_cfg["peak_min_distance_px"])
-        table, geometries = crown_table(labels, profile, chm,
-                                        crowns_cfg["height_percentile"],
-                                        crowns_cfg["min_crown_area_m2"])
-        if table.empty:
-            print(f"  {field}: no crowns above the minimum area, skipped")
-            continue
-
-        table.to_csv(os.path.join(out_dir, f"crowns_{field}.csv"), index=False)
-        gpd.GeoDataFrame(table, geometry=geometries, crs=profile["crs"]).to_file(
-            os.path.join(out_dir, f"crowns_{field}.gpkg"), driver="GPKG")
-
-        canopy_ha = float(table["area_m2"].sum()) / 10000.0
-        record = {
-            "field": field,
-            "source_mask": os.path.basename(mask_path),
-            "n_crowns": int(len(table)),
-            "canopy_ha": round(canopy_ha, 4),
-            "mean_crown_area_m2": round(float(table["area_m2"].mean()), 3),
-            "mean_crown_diameter_m": round(float(table["crown_diameter_m"].mean()), 3),
-        }
-        if "height_m" in table.columns:
-            record["mean_height_m"] = round(float(table["height_m"].mean()), 3)
-            record["max_height_m"] = round(float(table["height_m"].max()), 3)
-        summary.append(record)
-
-        line = (f"  {field}: {len(table):>5} crowns  canopy {canopy_ha:7.3f} ha"
-                f"  mean CD {record['mean_crown_diameter_m']:.2f} m")
-        if "mean_height_m" in record:
-            line += f"  mean H {record['mean_height_m']:.2f} m"
-        print(line)
-
-    if summary:
-        path = os.path.join(out_dir, "crown_summary.csv")
-        pd.DataFrame(summary).to_csv(path, index=False)
-        print(f"\n  summary -> {path}")
+    # crowns with the chosen parameters + validation
+    val = {}
+    rows = []
+    for k in (1, 2, 3):
+        chm, frac, X0, Y0, RES, ref, n = D[k]
+        lab, t = crown_table(cfg, k, chm, frac, X0, Y0, RES)
+        b, who, ga, qa = best_iou(lab, ref, n)
+        m = b >= cc["iou_match"]
+        dg = 2 * np.sqrt(ga[m] * RES * RES / np.pi)
+        dq = 2 * np.sqrt(qa[who[m]] * RES * RES / np.pi)
+        val[k] = dict(crowns=int(len(t["h95"])), flagged_removed=t["n_flagged"],
+                      reference_matched_share=round(float(m.mean()), 3),
+                      diameter_r=round(float(np.corrcoef(dg, dq)[0, 1]), 3),
+                      diameter_bias_m=round(float((dq - dg).mean()), 2),
+                      diameter_rmse_m=round(float(np.sqrt(((dq - dg) ** 2).mean())), 2),
+                      mean_height_m=round(float(t["h95"].mean()), 2), max_height_m=round(float(t["h95"].max()), 2),
+                      mean_crown_diameter_m=round(float(t["cd"].mean()), 2))
+        print(f"Field {k}:", val[k], flush=True)
+        rows.append(np.c_[np.full(len(t["h95"]), k), t["x"], t["y"], t["area"], t["cd"], t["h95"]])
+    save_json(val, out(cfg, "crown_validation.json"))
+    np.savetxt(out(cfg, "crowns_all_fields.csv"), np.vstack(rows), delimiter=",", comments="", fmt="%.3f",
+               header="field,x_utm45n,y_utm45n,area_m2,crown_diam_m,h95_m")
 
 
 if __name__ == "__main__":

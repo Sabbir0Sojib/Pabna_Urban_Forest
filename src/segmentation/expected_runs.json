@@ -1,0 +1,101 @@
+{
+ "S2_fold1_rgb_s0": {
+  "sha256": "0fe90cde100b8cd87a2991f7d3cc1c5c739e92b75cb1c1a62e666a071456bd5b",
+  "threshold": 0.35,
+  "A_min_px": 0,
+  "A_min_m2": 0.0,
+  "tta": true,
+  "step": 37584,
+  "test_F1": 0.882798,
+  "test_n_tiles": 485,
+  "session": "A"
+ },
+ "S2_fold2_rgb_s0": {
+  "sha256": "988a97b7130c841cf34eb7399edb8269cdd08932d96634214fe40a74eac5e575",
+  "threshold": 0.3,
+  "A_min_px": 0,
+  "A_min_m2": 0.0,
+  "tta": true,
+  "step": 11832,
+  "test_F1": 0.871775,
+  "test_n_tiles": 442,
+  "session": "B"
+ },
+ "S2_fold3_rgb_s0": {
+  "sha256": "66d50f08ef7f5a84770b103f109b5cb204985acbdfe3031ee5beb97ca279fab9",
+  "threshold": 0.4,
+  "A_min_px": 0,
+  "A_min_m2": 0.0,
+  "tta": true,
+  "step": 25056,
+  "test_F1": 0.880565,
+  "test_n_tiles": 376,
+  "session": "C"
+ },
+ "S2_fold1_rgb_s1": {
+  "sha256": "e7cf5d32d06058212d01c6283606a0674d0f072796b88e607cd3900ef8c4f38a",
+  "threshold": 0.3,
+  "A_min_px": 1479,
+  "A_min_m2": 1.0,
+  "tta": true,
+  "step": 18792,
+  "test_F1": 0.879689,
+  "test_n_tiles": 485,
+  "session": "E"
+ },
+ "S2_fold2_rgb_s1": {
+  "sha256": "c5c76ffdd59769e8257f2007ffa30b3bece4109bc833d3705db068f3c5203dde",
+  "threshold": 0.3,
+  "A_min_px": 740,
+  "A_min_m2": 0.5,
+  "tta": true,
+  "step": 12528,
+  "test_F1": 0.868176,
+  "test_n_tiles": 442,
+  "session": "F"
+ },
+ "S2_fold3_rgb_s1": {
+  "sha256": "bd684711a51d505402d60e8936ca4ce1b2f766df7881c55eae321593216409ee",
+  "threshold": 0.3,
+  "A_min_px": 740,
+  "A_min_m2": 0.5,
+  "tta": true,
+  "step": 31320,
+  "test_F1": 0.875848,
+  "test_n_tiles": 376,
+  "session": "G"
+ },
+ "S2_fold1_rgb_s2": {
+  "sha256": "a10a7c8d20d8c463196393cb0249d3f5d16c5d59d8014e9d3ade3e233b8de529",
+  "threshold": 0.45,
+  "A_min_px": 2959,
+  "A_min_m2": 2.0,
+  "tta": true,
+  "step": 9744,
+  "test_F1": 0.886733,
+  "test_n_tiles": 485,
+  "session": "H"
+ },
+ "S2_fold2_rgb_s2": {
+  "sha256": "33d8c488ef5cbbe527bd515867d44635594ef2ee5b74351d6704d5825e928064",
+  "threshold": 0.35,
+  "A_min_px": 740,
+  "A_min_m2": 0.5,
+  "tta": true,
+  "step": 41064,
+  "test_F1": 0.871908,
+  "test_n_tiles": 442,
+  "session": "I"
+ },
+ "S2_fold3_rgb_s2": {
+  "sha256": "a721ad84992bed26ea75a068cb890273dfb14211a4b2fc5df7b1aa142d3b59f0",
+  "threshold": 0.55,
+  "A_min_px": 740,
+  "A_min_m2": 0.5,
+  "tta": true,
+  "step": 6960,
+  "test_F1": 0.882496,
+  "test_n_tiles": 376,
+  "session": "J"
+ }
+}

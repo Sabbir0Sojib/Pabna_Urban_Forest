@@ -1,125 +1,190 @@
-"""Shared helpers: configuration, raster IO, the excess-green band, metrics."""
+"""Shared helpers: configuration, raster input/output, grids, polygons and metrics.
 
+All rasters are in EPSG:32645 (UTM zone 45N). A raster is handled as a NumPy array plus a
+small georeference dict ``g`` with the upper-left corner (x0, y0), the pixel size (sx, sy)
+and the nodata value. Rasterio is used when it is installed. A minimal GeoTIFF reader in
+``_tiff_fallback.py`` is used otherwise, so the analysis also runs where rasterio is missing.
+"""
+import json
 import os
 
 import numpy as np
-import rasterio
 import yaml
 
-HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+# ----------------------------------------------------------------------------- configuration
 def load_config(path=None):
-    """Read config.yaml from the repository root."""
-    path = path or os.path.join(HERE, "config.yaml")
-    with open(path, "r", encoding="utf-8") as fh:
-        cfg = yaml.safe_load(fh)
-    for key in ("output_dir", "checkpoint_dir"):
-        os.makedirs(os.path.join(HERE, cfg["paths"][key]), exist_ok=True)
+    path = path or os.path.join(ROOT, "config.yaml")
+    with open(path, encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+    cfg["_root"] = ROOT
     return cfg
 
 
-def project_path(*parts):
-    """Build a path relative to the repository root."""
-    return os.path.join(HERE, *parts)
+def p(cfg, *keys):
+    """Absolute path of an entry under cfg['paths'] (nested keys allowed)."""
+    v = cfg["paths"]
+    for k in keys:
+        v = v[k]
+    return v if os.path.isabs(v) else os.path.join(ROOT, v)
 
 
-# ---------------------------------------------------------------- raster IO
-
-def read_raster(path, band=None):
-    """Return (array, profile). With band=None all bands are read."""
-    with rasterio.open(path) as src:
-        arr = src.read(band) if band else src.read()
-        profile = src.profile.copy()
-    return arr, profile
+def rp(path):
+    """Absolute path for a path written relative to the repository root."""
+    return path if os.path.isabs(path) else os.path.join(ROOT, path)
 
 
-def pixel_area_m2(profile):
-    """Ground area of one pixel, in square metres."""
-    return abs(profile["transform"].a * profile["transform"].e)
+def out(cfg, name):
+    d = p(cfg, "output_dir")
+    os.makedirs(d, exist_ok=True)
+    return os.path.join(d, name)
 
 
-def write_raster(path, array, profile, dtype=None, nodata=None):
-    """Write a single-band raster, keeping the grid of `profile`."""
-    array = np.asarray(array)
-    out = profile.copy()
-    out.update(count=1, dtype=dtype or str(array.dtype), compress="lzw")
-    if nodata is not None:
-        out.update(nodata=nodata)
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    with rasterio.open(path, "w", **out) as dst:
-        dst.write(array.astype(out["dtype"]), 1)
-    return path
+def save_json(obj, path):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(obj, f, indent=1, default=lambda o: o.tolist() if hasattr(o, "tolist") else str(o))
 
 
-# ------------------------------------------------------------- spectral band
-
-def excess_green(rgb):
-    """Excess green index, ExG = 2G - R - B, rescaled to [0, 1].
-
-    Parameters
-    ----------
-    rgb : array, either (3, H, W) or (H, W, 3), any numeric range.
-    """
-    rgb = np.asarray(rgb, dtype=np.float32)
-    if rgb.shape[0] == 3 and rgb.ndim == 3:
-        r, g, b = rgb[0], rgb[1], rgb[2]
-    else:
-        r, g, b = rgb[..., 0], rgb[..., 1], rgb[..., 2]
-    if r.max() > 1.5:                     # assume 8 bit input
-        r, g, b = r / 255.0, g / 255.0, b / 255.0
-    exg = 2.0 * g - r - b                 # range [-2, 2]
-    return ((exg + 2.0) / 4.0).astype(np.float32)
+# ----------------------------------------------------------------------------- raster IO
+def read_raster(path):
+    """Return (array, g). Multi-band rasters come back as (bands, rows, cols)."""
+    try:
+        import rasterio
+    except ImportError:
+        from _tiff_fallback import read_any
+        return read_any(path)
+    with rasterio.open(path) as ds:
+        a = ds.read()
+        t = ds.transform
+        g = dict(x0=t.c, y0=t.f, sx=t.a, sy=-t.e, nodata=ds.nodata)
+    return (a[0] if a.shape[0] == 1 else a), g
 
 
-def normalized_difference(a, b):
-    """(a - b) / (a + b), guarded against division by zero."""
-    a = np.asarray(a, dtype=np.float32)
-    b = np.asarray(b, dtype=np.float32)
-    denom = a + b
-    return np.where(np.abs(denom) > 1e-6, (a - b) / denom, 0.0).astype(np.float32)
+def write_raster(path, a, g, nodata=None, dtype=None):
+    """Write a single-band GeoTIFF (EPSG:32645). Falls back to .npy without rasterio."""
+    try:
+        import rasterio
+        from rasterio.transform import from_origin
+    except ImportError:
+        np.save(os.path.splitext(path)[0] + ".npy", a)
+        return
+    a = a.astype(dtype or a.dtype)
+    with rasterio.open(path, "w", driver="GTiff", height=a.shape[0], width=a.shape[1], count=1,
+                       dtype=a.dtype, crs="EPSG:32645", nodata=nodata, compress="deflate",
+                       transform=from_origin(g["x0"], g["y0"], g["sx"], g["sy"])) as ds:
+        ds.write(a, 1)
 
 
-# -------------------------------------------------------------------- metrics
-
-def binary_metrics(y_true, y_pred):
-    """Precision, recall, F1, IoU, overall accuracy and Cohen's kappa."""
-    y_true = np.asarray(y_true).ravel().astype(bool)
-    y_pred = np.asarray(y_pred).ravel().astype(bool)
-    tp = int(np.sum(y_true & y_pred))
-    fp = int(np.sum(~y_true & y_pred))
-    fn = int(np.sum(y_true & ~y_pred))
-    tn = int(np.sum(~y_true & ~y_pred))
-    total = tp + fp + fn + tn
-
-    def div(num, den):
-        return float(num) / float(den) if den else 0.0
-
-    precision = div(tp, tp + fp)
-    recall = div(tp, tp + fn)
-    accuracy = div(tp + tn, total)
-    expected = div((tp + fp) * (tp + fn) + (fn + tn) * (fp + tn), total * total)
-    return {
-        "precision": precision,
-        "recall": recall,
-        "f1": div(2 * precision * recall, precision + recall),
-        "iou": div(tp, tp + fp + fn),
-        "overall_accuracy": accuracy,
-        "kappa": div(accuracy - expected, 1 - expected),
-    }
+# ----------------------------------------------------------------------------- satellite grid
+def load_scene(path, grid_g=None, grid_shape=None):
+    """PlanetScope 8-band scene as float32 (bands, H, W). If a reference grid is given, a
+    clipped scene is pasted into it at its pixel offset (missing pixels stay 0)."""
+    a, g = read_raster(path)
+    a = a.astype(np.float32)
+    if grid_g is None:
+        return a, g
+    H, W = grid_shape
+    full = np.zeros((a.shape[0], H, W), np.float32)
+    c0 = int(round((g["x0"] - grid_g["x0"]) / grid_g["sx"]))
+    r0 = int(round((grid_g["y0"] - g["y0"]) / grid_g["sy"]))
+    hh, ww = min(a.shape[1], H - r0), min(a.shape[2], W - c0)
+    full[:, r0:r0 + hh, c0:c0 + ww] = a[:, :hh, :ww]
+    return full, grid_g
 
 
-def gini(values):
-    """Gini coefficient of a non-negative distribution."""
-    x = np.sort(np.asarray(values, dtype=np.float64))
-    n = x.size
-    if n == 0 or x.sum() == 0:
-        return 0.0
-    index = np.arange(1, n + 1)
-    return float((2 * np.sum(index * x)) / (n * np.sum(x)) - (n + 1) / n)
+# ----------------------------------------------------------------------------- geometry
+def to_utm45(lon, lat):
+    """WGS84 longitude/latitude to UTM zone 45N (EPSG:32645), standard series formulas."""
+    a = 6378137.0
+    f = 1 / 298.257223563
+    e2 = f * (2 - f)
+    k0 = 0.9996
+    lon0 = np.radians(87)
+    lat = np.radians(lat)
+    lon = np.radians(lon)
+    ep2 = e2 / (1 - e2)
+    N = a / np.sqrt(1 - e2 * np.sin(lat) ** 2)
+    T = np.tan(lat) ** 2
+    C = ep2 * np.cos(lat) ** 2
+    A = np.cos(lat) * (lon - lon0)
+    M = a * ((1 - e2 / 4 - 3 * e2 ** 2 / 64 - 5 * e2 ** 3 / 256) * lat
+             - (3 * e2 / 8 + 3 * e2 ** 2 / 32 + 45 * e2 ** 3 / 1024) * np.sin(2 * lat)
+             + (15 * e2 ** 2 / 256 + 45 * e2 ** 3 / 1024) * np.sin(4 * lat)
+             - (35 * e2 ** 3 / 3072) * np.sin(6 * lat))
+    x = k0 * N * (A + (1 - T + C) * A ** 3 / 6 + (5 - 18 * T + T ** 2 + 72 * C - 58 * ep2) * A ** 5 / 120) + 500000
+    y = k0 * (M + N * np.tan(lat) * (A ** 2 / 2 + (5 - T + 9 * C + 4 * C ** 2) * A ** 4 / 24
+                                    + (61 - 58 * T + T ** 2 + 600 * C - 330 * ep2) * A ** 6 / 720))
+    return x, y
 
 
-def banner(text):
-    print("\n" + "=" * 68)
-    print(f"  {text}")
-    print("=" * 68)
+def load_polygons(path):
+    """GeoJSON polygons as (properties, [(is_outer, Nx2 UTM array), ...]). Lon/lat input is projected."""
+    g = json.load(open(path, encoding="utf-8"))
+    crs = json.dumps(g.get("crs", {}))
+    geographic = ("4326" in crs) or ("CRS84" in crs) or not g.get("crs")
+    feats = []
+    for ft in g["features"]:
+        gm = ft["geometry"]
+        polys = gm["coordinates"] if gm["type"] == "MultiPolygon" else [gm["coordinates"]]
+        rings = []
+        for poly in polys:
+            for i, r in enumerate(poly):
+                r = np.array(r)[:, :2]
+                if geographic and abs(r[0, 0]) <= 180:
+                    r = np.column_stack(to_utm45(r[:, 0], r[:, 1]))
+                rings.append((i == 0, r))
+        feats.append((ft["properties"], rings))
+    return feats
+
+
+def rasterize(rings, g, shape):
+    from PIL import Image, ImageDraw
+    H, W = shape
+    im = Image.new("L", (W, H), 0)
+    d = ImageDraw.Draw(im)
+    for outer, r in rings:
+        d.polygon([((x - g["x0"]) / g["sx"], (g["y0"] - y) / g["sy"]) for x, y in r], fill=1 if outer else 0)
+    return np.array(im).astype(bool)
+
+
+# ----------------------------------------------------------------------------- spectral helpers
+EPS = 1e-6
+
+
+def nd(a, b):
+    return (a - b) / (a + b + EPS)
+
+
+def ndvi(x):      # x: (8, H, W) reflectance; SuperDove band 6 = red, band 8 = NIR
+    return nd(x[7], x[5])
+
+
+def ndre(x):      # band 7 = red edge
+    return nd(x[7], x[6])
+
+
+def shift_bands(img, dy, dx):
+    from scipy import ndimage
+    if dy == 0 and dx == 0:
+        return img
+    return np.stack([ndimage.shift(b, (dy, dx), order=1, mode="nearest") for b in img])
+
+
+def best_shift(ndvi_img, fracs, fields, candidates):
+    """Co-registration shift (in 3 m pixels) that maximises the mean correlation between NDVI and
+    the UAV canopy fraction over the given (training) fields only."""
+    from scipy import ndimage
+    best = None
+    for dy, dx in candidates:
+        s = ndimage.shift(ndvi_img, (dy, dx), order=1, mode="nearest")
+        r = np.mean([np.corrcoef(s[np.isfinite(fracs[k])], fracs[k][np.isfinite(fracs[k])])[0, 1] for k in fields])
+        if best is None or r > best[0]:
+            best = (r, dy, dx)
+    return best[1], best[2]
+
+
+def best_threshold(prob, y, grid):
+    from sklearn.metrics import f1_score
+    return float(grid[int(np.argmax([f1_score(y, prob >= t, zero_division=0) for t in grid]))])

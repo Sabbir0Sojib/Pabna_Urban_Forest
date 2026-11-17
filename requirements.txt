@@ -1,27 +1,17 @@
-# Core
+# Analysis steps (src/s00-s07)
 numpy>=1.24
-pandas>=2.0
-pyyaml>=6.0
-
-# Raster and vector
-rasterio>=1.3
-geopandas>=0.14
-shapely>=2.0
-
-# Image processing
-scikit-image>=0.22
 scipy>=1.11
-opencv-python-headless>=4.8
-
-# Machine learning
 scikit-learn>=1.3
-
-# Deep learning (step 1 and 2 only)
-torch>=2.0
-segmentation-models-pytorch>=0.3.4
-timm>=0.9.0
-albumentations>=1.4.0
-pycocotools>=2.0.7
-
-# Plotting
+scikit-image>=0.22
+pyyaml>=6.0
+rasterio>=1.3
+tifffile>=2023.7
+pillow>=10.0
 matplotlib>=3.7
+
+# Segmentation (src/segmentation, GPU)
+torch>=2.0
+transformers>=4.40
+opencv-python-headless>=4.8
+pycocotools>=2.0.7
+pandas>=2.0

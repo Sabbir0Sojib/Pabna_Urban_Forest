@@ -1,106 +1,89 @@
-"""Step 0. Build a canopy height model for each field.
+"""Step 0. Canopy height model (Equation 1): CHM = UAV DSM - UAV ground-only DTM.
 
-Equation 1 of the manuscript:  CHM = DSM - DEM
+For each field, on a 0.25 m grid that covers the SegFormer canopy mask:
+  * DSM: maximum of the 5.3 cm DSM values in each cell (crown tops are kept)
+  * DTM: bilinear sample of the 10 cm ground-only DTM at the cell centre
+  * canopy fraction: mean of the SegFormer canopy mask (1 tree, 0 non-tree) in each cell
+Both surfaces come from the same Metashape project, so there is no date, resolution or
+vertical-datum mismatch between them (the 12.5 m ALOS PALSAR DEM is no longer used).
 
-Input  : paths.field_dsm    UAV digital surface model per field
-         paths.terrain_dem  ALOS PALSAR 12.5 m terrain reference
-Output : outputs/<Field>_chm.tif, on the DSM grid
-
-The terrain DEM is far coarser than the UAV surface, so it is resampled onto
-the DSM grid bilinearly before subtraction. Negative differences, which occur
-where the coarse terrain sits above the fine surface, are clipped to zero.
-
-This step is optional. If the DSM or the terrain DEM is missing the step exits
-quietly, and the pipeline still produces every canopy result. Crown heights,
-and therefore biomass in step 5, do require it.
+Output: outputs/chm_F{k}.npz with chm_max, chm_mean, frac, X0, Y0, RES.
 """
-
-import os
+import sys
 
 import numpy as np
-from rasterio.warp import Resampling, reproject
+from scipy import ndimage
 
-from utils import (banner, load_config, project_path, read_raster,
-                   write_raster)
-
-
-def resample_onto(source, source_profile, target_profile):
-    """Resample `source` onto the grid described by `target_profile`."""
-    destination = np.zeros(
-        (target_profile["height"], target_profile["width"]), dtype=np.float32)
-    reproject(
-        source=np.asarray(source, dtype=np.float32),
-        destination=destination,
-        src_transform=source_profile["transform"],
-        src_crs=source_profile["crs"],
-        src_nodata=source_profile.get("nodata"),
-        dst_transform=target_profile["transform"],
-        dst_crs=target_profile["crs"],
-        dst_nodata=np.nan,
-        resampling=Resampling.bilinear,
-    )
-    return destination
+from utils import load_config, out, p, read_raster
 
 
-def build_chm(dsm, dsm_profile, dem, dem_profile, min_height, max_height):
-    """Subtract the terrain surface from the UAV surface."""
-    dsm = np.asarray(dsm, dtype=np.float32)
-    nodata = dsm_profile.get("nodata")
-    if nodata is not None:
-        dsm = np.where(dsm == nodata, np.nan, dsm)
-
-    terrain = resample_onto(dem, dem_profile, dsm_profile)
-    chm = dsm - terrain
-
-    chm = np.where(np.isfinite(chm), chm, 0.0)
-    chm = np.clip(chm, min_height, max_height)
-    return chm.astype(np.float32)
-
-
-def main():
-    cfg = load_config()
-    paths = cfg["paths"]
-    chm_cfg = cfg["chm"]
-    out_dir = project_path(paths["output_dir"])
-
-    banner("Step 0  canopy height model (Equation 1)")
-
-    dem_path = project_path(paths["terrain_dem"])
-    if not os.path.exists(dem_path):
-        print(f"  terrain DEM not found at {paths['terrain_dem']}")
-        print("  skipping. Steps 1-4 and 6 do not need it; step 5 does.")
-        return
-
-    dem, dem_profile = read_raster(dem_path, band=1)
-
-    built = 0
-    for field in paths["field_orthomosaics"]:
-        dsm_rel = paths["field_dsm"].get(field) or ""
-        dsm_path = project_path(dsm_rel) if dsm_rel else ""
-        if not dsm_path or not os.path.exists(dsm_path):
-            print(f"  {field}: no DSM at {dsm_rel or '(unset)'}, skipped")
+def bin_to_grid(a, g, X0, Y0, RES, H, W, want_max=False):
+    """Mean (and optionally maximum) of fine raster values inside each coarse cell."""
+    h, w = a.shape
+    ys = g["y0"] - (np.arange(h) + 0.5) * g["sy"]
+    xs = g["x0"] + (np.arange(w) + 0.5) * g["sx"]
+    R = np.floor((Y0 - ys) / RES).astype(int)
+    C = np.floor((xs - X0) / RES).astype(int)
+    okc = (C >= 0) & (C < W)
+    s = np.zeros((H, W))
+    n = np.zeros((H, W))
+    mx = np.full((H, W), -np.inf, np.float32)
+    for i in range(h):
+        r = R[i]
+        if r < 0 or r >= H:
             continue
+        v = a[i]
+        ok = okc & np.isfinite(v)
+        np.add.at(s[r], C[ok], v[ok])
+        np.add.at(n[r], C[ok], 1)
+        if want_max:
+            np.maximum.at(mx[r], C[ok], v[ok])
+    mean = (s / np.where(n > 0, n, np.nan)).astype(np.float32)
+    return mean, n, mx
 
-        dsm, dsm_profile = read_raster(dsm_path, band=1)
-        chm = build_chm(dsm, dsm_profile, dem, dem_profile,
-                        chm_cfg["min_height_m"], chm_cfg["max_height_m"])
 
-        destination = os.path.join(out_dir, f"{field}_chm.tif")
-        write_raster(destination, chm, dsm_profile, dtype="float32")
-        built += 1
+def build(cfg, k):
+    RES = cfg["grid"]["chm_resolution_m"]
+    dsm, gd = read_raster(p(cfg, "dsm", k))
+    dsm = dsm.astype(np.float32)
+    dsm[dsm < -1000] = np.nan
+    dtm, gt = read_raster(p(cfg, "dtm", k))
+    dtm = dtm.astype(np.float32)
+    dtm[dtm < -1000] = np.nan
+    m, gm = read_raster(p(cfg, "canopy_mask", k))
 
-        canopy = chm[chm > 1.0]
-        print(f"  {field}: CHM written  mean {canopy.mean():5.2f} m"
-              f"  max {chm.max():6.2f} m  -> {os.path.basename(destination)}"
-              if canopy.size else
-              f"  {field}: CHM written, no pixels above 1 m")
+    X0, Y0 = gm["x0"], gm["y0"]
+    W = int(m.shape[1] * gm["sx"] / RES)
+    H = int(m.shape[0] * gm["sy"] / RES)
 
-    if built == 0:
-        print("\n  No CHM produced. Export the UAV DSM from your photogrammetry")
-        print("  project and set paths.field_dsm in config.yaml.")
-    else:
-        print(f"\n  {built} canopy height model(s) in {out_dir}")
+    dsm_mean, nd, dsm_max = bin_to_grid(dsm, gd, X0, Y0, RES, H, W, want_max=True)
+    del dsm
+
+    yy = Y0 - (np.arange(H) + 0.5) * RES
+    xx = X0 + (np.arange(W) + 0.5) * RES
+    ri = (gt["y0"] - yy) / gt["sy"] - 0.5
+    ci = (xx - gt["x0"]) / gt["sx"] - 0.5
+    coords = np.meshgrid(ri, ci, indexing="ij")
+    valid_dtm = ndimage.map_coordinates(np.isfinite(dtm).astype(np.float32), coords, order=0, cval=0) > 0
+    dtm_f = np.where(np.isfinite(dtm), dtm, np.nanmedian(dtm))
+    dtm_r = ndimage.map_coordinates(dtm_f, coords, order=1, cval=np.nan).astype(np.float32)
+
+    mm = np.where(m == 255, np.nan, m.astype(np.float32))
+    del m
+    frac, _, _ = bin_to_grid(mm, gm, X0, Y0, RES, H, W)
+
+    chm = dsm_max - dtm_r
+    chm[~valid_dtm | ~np.isfinite(chm) | (nd == 0)] = np.nan
+    chm_mean = dsm_mean - dtm_r
+    chm_mean[~valid_dtm] = np.nan
+    np.savez_compressed(out(cfg, f"chm_F{k}.npz"), chm_max=chm.astype(np.float32),
+                        chm_mean=chm_mean.astype(np.float32), frac=frac, X0=X0, Y0=Y0, RES=RES)
+    tree = frac >= 0.5
+    print(f"Field {k}: grid {H} x {W}; CHM percentiles in canopy cells (5,25,50,75,95):",
+          np.nanpercentile(chm[tree], [5, 25, 50, 75, 95]).round(2), flush=True)
 
 
 if __name__ == "__main__":
-    main()
+    cfg = load_config()
+    for k in ([int(a) for a in sys.argv[1:]] or [1, 2, 3]):
+        build(cfg, k)

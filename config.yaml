@@ -1,132 +1,88 @@
 # ==========================================================================
-# Configuration for the Pabna urban tree canopy and biomass pipeline.
-# The allometric coefficients below are the published values used in the
-# manuscript (Equations 2 and 3). Only the file paths normally need editing.
+# Pabna urban tree canopy, biomass and carbon: configuration
+# Settings match the revised manuscript (JAG-D-26-04430, revision 1).
+# Normally only the file paths need editing. All rasters are EPSG:32645.
 # ==========================================================================
 
-project:
-  name: pabna-urban-forest
-  crs: "EPSG:32645"          # UTM zone 45N, the projected CRS used throughout
-  seed: 42
-
 paths:
-  data_dir: data
   output_dir: outputs
-  checkpoint_dir: checkpoints
 
-  # Step 1: annotated UAV tiles in COCO format (Roboflow-style folders)
-  seg_dataset_dir: data/uav_tiles          # expects train/ valid/ test/
+  # UAV products per field (Agisoft Metashape 2.3.1, 15 and 25 January 2026)
+  dsm:    {1: data/uav/Field1_DSM.tif, 2: data/uav/Field2_DSM.tif, 3: data/uav/Field3_DSM.tif}   # 5.3 cm
+  dtm:    {1: data/uav/Field1_DTM.tif, 2: data/uav/Field2_DTM.tif, 3: data/uav/Field3_DTM.tif}   # 10 cm, ground only
 
-  # Step 2: full UAV orthomosaics, one GeoTIFF per survey field. The Zenodo
-  # deposit holds only raw photographs; build these yourself with
-  # photogrammetry software (Agisoft Metashape, Pix4Dmapper, OpenDroneMap).
-  field_orthomosaics:
-    Field1: data/Field1_ortho.tif
-    Field2: data/Field2_ortho.tif
-    Field3: data/Field3_ortho.tif
+  # Full-field SegFormer canopy masks from the leave-one-field-out models
+  # (src/segmentation/pabna_canopy_maps.py): 1 tree, 0 non-tree, 255 nodata
+  canopy_mask: {1: data/uav/Field1_canopy_mask.tif, 2: data/uav/Field2_canopy_mask.tif, 3: data/uav/Field3_canopy_mask.tif}
 
-  # Reference canopy masks for the three fields, on the orthomosaic grid.
-  # Not part of the deposit. Step 3 uses these when present, otherwise it
-  # falls back to the step 2 predictions (with no ground truth to score them
-  # against).
-  field_masks:
-    Field1: data/Field1_mask.tif
-    Field2: data/Field2_mask.tif
-    Field3: data/Field3_mask.tif
+  # UAV reference canopy masks used for the 3 m satellite classifier tests (1 tree, 0 non-tree)
+  reference_mask_3m: {1: data/uav/Field1_mask.tif, 2: data/uav/Field2_mask.tif, 3: data/uav/Field3_mask.tif}
 
-  # ---- Step 0 inputs, Equation 1: CHM = DSM - DEM ----
-  # UAV digital surface models. Build these from the same raw photographs as
-  # the orthomosaics above, in the same photogrammetry run.
-  field_dsm:
-    Field1: data/Field1_dsm.tif
-    Field2: data/Field2_dsm.tif
-    Field3: data/Field3_dsm.tif
+  # 1,320 manually delineated reference crowns (GeoJSON, property "field" = Field1/Field2/Field3)
+  reference_crowns: data/reference/gt_crowns_1320.geojson
 
-  # Terrain reference. ALOS PALSAR 12.5 m DEM, free from the Alaska Satellite
-  # Facility. Resampled onto each DSM grid by step 0.
-  terrain_dem: data/alos_palsar_dem.tif
+  # PlanetScope SuperDove 8-band surface reflectance (3 m)
+  scene_main: data/planetscope/PlanetScope_SR_8b_2026-01-12.tif            # defines the 3 m grid
+  scene_fill: data/planetscope/PlanetScope_SR_8b_2026-01-12_composite.tif  # same date, fills 3.12 ha of Ward 6
+  scenes_extra:                                                           # clipped scenes for the 3-date tests
+    - data/planetscope/PlanetScope_SR_8b_2026-01-15_clip.tif
+    - data/planetscope/PlanetScope_SR_8b_2026-01-22_clip.tif
+  scene_check: data/planetscope/PlanetScope_SR_8b_2026-01-22.tif           # robustness check of the city map
 
-  # Canopy height models. Step 0 writes these; step 3 reads them to get crown
-  # heights. Point them at your own CHM instead if you already have one.
-  field_chm:
-    Field1: outputs/Field1_chm.tif
-    Field2: outputs/Field2_chm.tif
-    Field3: outputs/Field3_chm.tif
+  wards: data/boundaries/ward_boundary_15wards.geojson   # property "id" = 1..15
 
-  # Step 4 inputs, and the city-wide mask it produces
-  satellite_image: data/planetscope_superdove.tif   # 8 band, 3 m
-  ward_boundaries: data/ward_boundary.geojson
-  citywide_tree_mask: data/citywide_tree_mask.tif   # reuse instead of step 4
+  # Global canopy height maps resampled to the 1 m grid of the study (see data/README.md)
+  global_chm: {Meta_WRI_v1: data/global_chm/Meta_WRI_v1_1m.tif, CHMv2: data/global_chm/CHMv2_1m.tif}
 
-segmentation:
-  architecture: segformer        # segformer | unet | deeplabv3plus
-  encoder: mit_b2
-  # Leave empty to use checkpoints/<tag>_best.pt produced by step 1. Set it to a
-  # downloaded weights file to skip training altogether.
-  checkpoint: ""
-  use_exg: true                  # append the excess-green band as a 4th channel
-  img_size: 512
-  batch_size: 6
-  epochs: 100
-  learning_rate: 0.00006
-  weight_decay: 0.01
-  num_workers: 2
-
-inference:
-  tile_size: 640
-  tile_overlap: 64
-  probability_threshold: 0.5
-
-chm:
-  max_height_m: 45.0             # taller values are treated as artefacts
-  min_height_m: 0.0              # negative differences are clipped to zero
+grid:
+  chm_resolution_m: 0.25          # CHM and canopy fraction grid for crown delineation
+  full_cover_share: 0.95          # a 3 m or 1 m cell needs >= 95% UAV pixels to be used
 
 crowns:
-  min_crown_area_m2: 1.5         # smaller segments are discarded as noise
-  peak_min_distance_px: 5        # watershed seed separation
-  height_percentile: 95          # per-crown height statistic from the CHM
+  canopy_fraction_min: 0.5        # 0.25 m cell is canopy if >= 50% SegFormer canopy
+  min_height_m: 2.0
+  marker_min_distance_m: 1.0      # chosen against the 1,320 reference crowns (scan below)
+  smoothing_sigma_m: 1.0
+  scan_min_distance_m: [1.0, 1.5, 2.0, 3.0]
+  scan_sigma_m: [0.25, 0.5, 1.0]
+  min_area_m2: 1.0
+  max_height_m: 25.0              # crowns with p95 height above this are flagged and removed
+  height_percentile: 95
+  iou_match: 0.5
 
-classifier:
-  n_estimators: 500
-  max_depth: null
-  min_samples_leaf: 2
-  cv_folds: 5
-  decision_threshold: 0.50
-  local_window_sizes: [3, 5, 9]  # window sizes for local mean features
+satellite:
+  label_rules: [0.5, 0.2]         # 3 m pixel = tree if UAV canopy fraction >= rule
+  shift_candidates_dy: [-1.5, -1, -0.5, 0, 0.5, 1]
+  shift_candidates_dx: [-3, -2.5, -2, -1.5, -1, -0.5, 0, 0.5, 1]
+  threshold_grid: [0.03, 0.97, 0.02]   # start, stop, step
+  seed: 42
+
+subpixel:
+  shift_candidates_dy: [-1, -0.5, 0, 0.5]
+  shift_candidates_dx: [-3, -2.5, -2, -1.5, -1, -0.5, 0]
+  neighbourhood: 5                # 5 x 5 neighbourhood of 3 m pixels
+  max_train_rows: 300000
+  city_rows_per_field: 130000
+  hgb: {max_iter: 300, learning_rate: 0.06, max_leaf_nodes: 63, l2_regularization: 1.0, random_state: 42}
 
 allometry:
-  # ----------------------------------------------------------------------
-  # Equation 2 of the manuscript. Jucker et al. (2017), crown height and
-  # crown diameter to stem diameter:
-  #
-  #     D_cm = a * (H_m * CD_m) ** b * exp(sigma_squared / 2)
-  #
-  # The exponential term is the back-transformation correction for a model
-  # fitted in log space.
-  # ----------------------------------------------------------------------
-  jucker:
-    a: 0.557
-    b: 0.809
-    sigma_squared: 0.0562
+  # Equation 2, Jucker et al. (2017): D_cm = 0.557 (H x CD)^0.809 exp(sigma^2 / 2), sigma = 0.056
+  jucker: {a: 0.557, b: 0.809, sigma: 0.056}
+  # Equation 3, Chave et al. (2014): AGB_kg = 0.0673 (rho D^2 H)^0.976, residual SE 0.357
+  chave: {a: 0.0673, b: 0.976, sigma: 0.357}
+  wood_density: {mean: 0.58, field_sd: 0.05, crown_sd: 0.10, min: 0.25, max: 1.0}   # g cm-3, Reyes et al. (1992)
 
-  # ----------------------------------------------------------------------
-  # Equation 3 of the manuscript. Chave et al. (2014) pantropical model:
-  #
-  #     AGB_kg = a * (rho * D_cm ** 2 * H_m) ** b
-  # ----------------------------------------------------------------------
-  chave:
-    a: 0.0673
-    b: 0.976
-
-  # Community wood density, Chave et al. (2009). The range is the species
-  # spread used for the sensitivity test reported in Section 2.5.
-  wood_density_g_cm3: 0.55
-  wood_density_range: [0.40, 0.70]
+monte_carlo:
+  runs: 1000
+  seed: 20261114
+  height_sd_field_m: 0.5
+  height_sd_crown_m: 1.0
+  crown_diameter_log_sd: 0.15
 
 carbon:
-  carbon_fraction: 0.47          # IPCC default carbon fraction of dry biomass
-  co2_per_carbon: 3.67           # molecular mass ratio 44/12
+  carbon_fraction: 0.47           # IPCC (2006)
+  co2_per_carbon: 3.67
 
 study_area:
-  total_area_ha: 1081.33
+  area_ha: 1081.33
   n_wards: 15
